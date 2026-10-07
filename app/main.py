@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
@@ -22,7 +22,14 @@ from app.models import (
 
 logger = logging.getLogger("job_tracker")
 logging.basicConfig(level=logging.INFO)
-
+# Days until auto-scheduled follow-up, per status. None = no follow-up.
+FOLLOW_UP_DAYS: dict[str, int | None] = {
+    "Applied": None,
+    "Screening": 5,
+    "Technical": 5,
+    "Offer": 3,
+    "Rejected": None,
+}
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -104,6 +111,41 @@ def list_applications(
         results.append(ApplicationRead.model_validate(obj, from_attributes=True))
     return results
 
+@app.patch("/applications/{application_id}", response_model=ApplicationRead, tags=["applications"])
+def update_application(
+    application_id: int,
+    payload: ApplicationUpdate,
+    session: Session = Depends(get_session),
+) -> Application:
+    application = _get_or_404(session, application_id)
+    updates = payload.model_dump(exclude_unset=True)
+
+    # Auto-stamp timestamps on status transitions (user never types these).
+    if "status" in updates and updates["status"] != application.status:
+        now = datetime.now(timezone.utc)
+        new_status = updates["status"]
+
+        if new_status in ("Screening", "Technical", "Offer") and application.first_response_at is None:
+            application.first_response_at = now
+        if new_status == "Technical" and application.first_interview_at is None:
+            application.first_interview_at = now
+        if new_status == "Offer" and application.offer_at is None:
+            application.offer_at = now
+        if new_status == "Rejected" and application.rejected_at is None:
+            application.rejected_at = now
+
+        # Auto follow-up: only when the user didn't explicitly set one.
+        if "next_follow_up" not in updates:
+            days = FOLLOW_UP_DAYS.get(new_status)
+            application.next_follow_up = (
+                (now + timedelta(days=days)).date() if days is not None else None
+            )
+            
+    application.sqlmodel_update(updates)
+    session.add(application)
+    session.commit()
+    session.refresh(application)
+    return application
 
 @app.delete("/applications/{application_id}", status_code=204, tags=["applications"])
 def delete_application(application_id: int, session: Session = Depends(get_session)) -> Response:
