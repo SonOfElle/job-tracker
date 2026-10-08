@@ -30,7 +30,6 @@ services:
         condition: service_healthy
 
   ui:
-    build: .
     image: job-tracker:latest
     container_name: job_tracker_ui
     restart: unless-stopped
