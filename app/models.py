@@ -37,6 +37,20 @@ class ApplicationBase(SQLModel):
     next_follow_up: Optional[date] = Field(default=None, index=True)
     tech_stack: List[str] = Field(default_factory=list, sa_type=ARRAY(Text))
     notes: Optional[str] = Field(default=None, sa_type=Text)
+    # CV (path set by the upload endpoint, not the create form)
+    cv_path: Optional[str] = Field(default=None, sa_type=Text)
+    cv_filename: Optional[str] = Field(default=None, max_length=255)
+
+    # Where the application came from (LinkedIn, Referral, etc.)
+    # Derived from job_link at create/update if not set explicitly.
+    source: Optional[str] = Field(default=None, max_length=50, index=True)
+
+    # Contact (separate fields, not a blob)
+    contact_name: Optional[str] = Field(default=None, max_length=100)
+    contact_email: Optional[str] = Field(default=None, max_length=200)
+
+    # Set when status becomes Rejected
+    rejection_reason: Optional[str] = Field(default=None, sa_type=Text)
 
 
 class Application(ApplicationBase, table=True):
@@ -81,6 +95,12 @@ class ApplicationUpdate(SQLModel):
     next_follow_up: Optional[date] = None
     tech_stack: Optional[List[str]] = Field(default=None, sa_type=ARRAY(Text))
     notes: Optional[str] = Field(default=None, sa_type=Text)
+    cv_path: Optional[str] = Field(default=None, sa_type=Text)
+    cv_filename: Optional[str] = Field(default=None, max_length=255)
+    source: Optional[str] = Field(default=None, max_length=50)
+    contact_name: Optional[str] = Field(default=None, max_length=100)
+    contact_email: Optional[str] = Field(default=None, max_length=200)
+    rejection_reason: Optional[str] = Field(default=None, sa_type=Text)
 
 
 class ApplicationRead(ApplicationBase):
