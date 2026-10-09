@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from sqlalchemy import select, text
 from sqlmodel import Session
 
-from app.database import get_session, init_db
+from app.database import check_schema, get_session
 from app.models import (
     Application,
     ApplicationCreate,
@@ -22,6 +22,7 @@ from app.models import (
 
 logger = logging.getLogger("job_tracker")
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("alembic").setLevel(logging.WARNING)
 # Days until auto-scheduled follow-up, per status. None = no follow-up.
 FOLLOW_UP_DAYS: dict[str, int | None] = {
     "Applied": None,
@@ -33,8 +34,8 @@ FOLLOW_UP_DAYS: dict[str, int | None] = {
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    init_db()
-    logger.info("Database ready; schema ensured.")
+    check_schema()
+    logger.info("Database schema verified.")
     yield
 
 
