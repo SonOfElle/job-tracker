@@ -10,19 +10,22 @@
 ![Tailscale](https://img.shields.io/badge/Tailscale-000000?style=for-the-badge&logo=tailscale&logoColor=white)
 
 > I got tired of tracking job applications in a spreadsheet.
-> So I built a database, a REST API, a containerized deployment, and a
-> nightly backup pipeline.
+>
+> So naturally I built a Postgres database, a REST API, a containerized
+> deployment, and a nightly backup pipeline with a tested restore procedure.
+>
+> For a job tracker. For me. A single user.
 >
 > Normal response, right?
 
 Built to be used, not to be demoed. The portfolio angle is a side effect.
 
-## Status
+## Whats working
 
 Track 1 complete and running on a home server. Single user. Reached only
 through Tailscale. Track 2 (analytics layer) not started and not needed yet.
 
-## What it does
+## What it actually does
 
 **Tracking**
 - Five statuses: Applied, Screening, Technical, Offer, Rejected
@@ -45,7 +48,7 @@ through Tailscale. Track 2 (analytics layer) not started and not needed yet.
 - Bulk selection with CSV export and bulk delete
 - Stale banner when follow-ups are overdue
 
-## Architecture
+## How it's put together
 
 ### Dev
 
@@ -73,7 +76,7 @@ Access is Tailscale-only. The UI listens on the Tailscale IP, not on
 `0.0.0.0`. Nothing is port-forwarded. The API and database are not reachable
 from the host at all.
 
-## Stack
+## The stack; and yes, we know these, AI and I
 
 | Layer | Tool | Version |
 |---|---|---|
@@ -91,26 +94,40 @@ needs for `DEFAULT_EXCLUDED_CONTENT_TYPES`. FastAPI 0.115.6 caps Starlette
 below that and breaks Streamlit. And `psycopg[binary]` 3.2.13 has a Python
 3.14 wheel; 3.2.3 does not.
 
-## Quick start (dev)
+## Running it locally (dev)
 
-Requires Python 3.14, Docker Desktop, Git Bash.
+## Running it locally (dev)
+
+Requires Python 3.14, Docker Desktop (running), Git Bash, and `make`. If
+`make` isn't available on your system, the raw commands are provided below
+each `make` step.
 
 ```bash
+# get the code
+git clone git@github.com:SonOfElle/job-tracker.git
+cd job-tracker
+
+# activate venv
 python -m venv .venv
 source .venv/Scripts/activate
 pip install -r requirements.txt
 
+# configure credentials. Password appears in BOTH POSTGRES_PASSWORD and
+# DATABASE_URL; change both or the API can't reach the DB.
 cp .env.example .env
-# edit .env if you want a different password
+# edit .env
 
+# start the database and apply migrations
 docker compose up -d db
 alembic upgrade head
 
-# terminal 1
+# terminal 1 (reactivate the venv in this terminal first)
 make api
+# or: uvicorn app.main:app --host 127.0.0.1 --port 8050
 
-# terminal 2
+# terminal 2 (reactivate the venv in this terminal first)
 make ui
+# or: API_BASE_URL=http://127.0.0.1:8050 streamlit run ui/app.py --server.port 8501
 ```
 
 Then open `http://localhost:8501`.
@@ -118,17 +135,27 @@ Then open `http://localhost:8501`.
 Only the `db` container runs during development. The dev API runs bare, which
 is faster for reload cycles.
 
-## Deploy (prod)
+## Deploying it (prod)
 
 Assumes Ubuntu, Docker installed, Tailscale up, SSH key added to GitHub.
 
 ```bash
-git clone git@github.com:SonOfElle/job-tracker.git
+# get the code
+git clone https://github.com/SonOfElle/job-tracker.git
 cd job-tracker
+
+# configure credentials. Password appears in BOTH POSTGRES_PASSWORD and
+# DATABASE_URL; change both or the API can't reach the DB.
 cp .env.example .env
 chmod 600 .env
-# edit .env: set POSTGRES_PASSWORD and CV_HOST_PATH
+# edit .env: set the password in both places, and set CV_HOST_PATH
 
+# create the host directory that gets bind-mounted into the container.
+# If this doesn't exist, Docker creates it as root and the api container
+# (running as uid 1000) can't write CVs.
+mkdir -p /path/to/directory/Job_tracker/cvs
+
+# build and run migrations, then bring up the stack
 docker compose build
 docker compose run --rm --no-deps api alembic upgrade head
 docker compose up -d
@@ -143,7 +170,7 @@ owned by the server user, not root. The `ui` container runs as root because
 it needs a writable home for Streamlit caches and never touches the CV
 directory.
 
-## Migrations
+## Schema changes don't scare me
 
 Alembic owns the schema. The API does not create tables. On startup it
 compares the DB's `alembic_version` to the code's expected head and refuses
@@ -167,7 +194,7 @@ make migrate-prod
 Migrations are copied into the container, so `migrate-prod` runs against the
 deploy image without a separate build step.
 
-## Backups
+## Backups; or, the part everyone skips
 
 Nightly at 03:00 via cron. A shell script on the server dumps the database,
 gzips it, tars the CV directory with the same timestamp, and prunes anything
@@ -201,7 +228,7 @@ deletion, bad migrations.
 **What it doesn't:** fire, theft, a PSU that fries both drives. Same machine,
 same house. If that matters, add an offsite copy. Nothing here prevents it.
 
-## Design decisions
+## Choices I'd maybe make again
 
 A few choices worth writing down. Most are a response to a specific problem,
 not a preference.
@@ -266,7 +293,7 @@ server off the internet in two lines. The first version had the UI on
 `0.0.0.0`, and the external URL in the logs read as a public IP, which is the
 kind of thing you notice late. Bind to the interface you actually use.
 
-## What's not built
+## What's not built ye
 
 Track 2, the analytics layer. When it exists, it'll be a small dbt project
 with staging and marts schemas, a nightly snapshot job, and a Streamlit page
@@ -283,7 +310,5 @@ half-built.
 
 ---
 
-Built by [@SonOfElle](https://github.com/SonOfElle).
-
-If you're reading this: yes, I know this is overkill for a job
+Built by [ME](https://github.com/SonOfElle), and if you're reading this: yes, I know this is overkill for a job
 tracker. That's the point.
