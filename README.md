@@ -8,7 +8,6 @@
 ![Alembic](https://img.shields.io/badge/Alembic-1.20-6BA81E?style=for-the-badge)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![Tailscale](https://img.shields.io/badge/Tailscale-only-000000?style=for-the-badge&logo=tailscale&logoColor=white)
-![Built to be used](https://img.shields.io/badge/built_to_be-used,_not_demoed-orange?style=for-the-badge)
 
 > I got tired of tracking job applications in a spreadsheet.
 > So I built a database, a REST API, a containerized deployment, and a
