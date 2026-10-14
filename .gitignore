@@ -10,8 +10,11 @@ venv/
 .env.*
 !.env.example
 
-# Data — never commit
-data/
+# Data — never commit, but track the empty cvs scaffolding
+data/*
+!data/cvs/
+data/cvs/*
+!data/cvs/.gitkeep
 *.sqlite
 *.db
 postgres_data/
