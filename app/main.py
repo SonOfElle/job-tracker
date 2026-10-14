@@ -5,8 +5,8 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
-
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select, text
 from sqlmodel import Session
 
@@ -18,6 +18,14 @@ from app.models import (
     ApplicationStatus,
     ApplicationUpdate,
     StrategyType,
+)
+
+from app.source_parser import derive_source
+from app.storage import (
+    cv_full_path,
+    delete_cv_file,
+    sanitize_filename,
+    save_cv,
 )
 
 logger = logging.getLogger("job_tracker")
@@ -77,11 +85,12 @@ def create_application(
     session: Session = Depends(get_session),
 ) -> Application:
     application = Application.model_validate(payload)
+    if application.source is None:
+        application.source = derive_source(application.job_link)
     session.add(application)
     session.commit()
     session.refresh(application)
     return application
-
 
 @app.get("/applications/{application_id}", response_model=ApplicationRead, tags=["applications"])
 def get_application(application_id: int, session: Session = Depends(get_session)) -> Application:
@@ -141,6 +150,13 @@ def update_application(
             application.next_follow_up = (
                 (now + timedelta(days=days)).date() if days is not None else None
             )
+
+    # If the link is being updated and the user didn't set source in the same
+    # request, re-derive source from the new link. Cleared links leave source alone.
+    if "job_link" in updates and "source" not in updates:
+        new_link = updates["job_link"]
+        if new_link:
+            updates["source"] = derive_source(new_link)
             
     application.sqlmodel_update(updates)
     session.add(application)
@@ -153,4 +169,73 @@ def delete_application(application_id: int, session: Session = Depends(get_sessi
     application = _get_or_404(session, application_id)
     session.delete(application)
     session.commit()
+    return Response(status_code=204)
+
+# ---- CV ---------------------------------------------------------------- #
+
+@app.post("/applications/{application_id}/cv", response_model=ApplicationRead, tags=["applications"])
+def upload_cv(
+    application_id: int,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+) -> Application:
+    application = _get_or_404(session, application_id)
+    filename = sanitize_filename(file.filename or "cv.pdf")
+
+    try:
+        rel_path, size = save_cv(application_id, filename, file.file)
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+
+    old_path = application.cv_path
+    application.cv_path = rel_path
+    application.cv_filename = filename
+    session.add(application)
+    session.commit()
+    session.refresh(application)
+
+    # If the previous CV had a different filename, remove the old file.
+    if old_path and old_path != rel_path:
+        delete_cv_file(old_path)
+
+    logger.info("CV saved for application %d: %s (%d bytes)", application_id, filename, size)
+    return application
+
+
+@app.get("/applications/{application_id}/cv", tags=["applications"])
+def download_cv(
+    application_id: int,
+    session: Session = Depends(get_session),
+) -> FileResponse:
+    application = _get_or_404(session, application_id)
+    if not application.cv_path:
+        raise HTTPException(status_code=404, detail="No CV uploaded for this application")
+
+    full = cv_full_path(application.cv_path)
+    if not full.is_file():
+        raise HTTPException(status_code=404, detail="CV file missing on disk")
+
+    return FileResponse(
+        path=full,
+        filename=application.cv_filename or full.name,
+        media_type="application/octet-stream",
+    )
+
+
+@app.delete("/applications/{application_id}/cv", status_code=204, tags=["applications"])
+def delete_cv(
+    application_id: int,
+    session: Session = Depends(get_session),
+) -> Response:
+    application = _get_or_404(session, application_id)
+    if not application.cv_path:
+        raise HTTPException(status_code=404, detail="No CV uploaded for this application")
+
+    old_path = application.cv_path
+    application.cv_path = None
+    application.cv_filename = None
+    session.add(application)
+    session.commit()
+
+    delete_cv_file(old_path)
     return Response(status_code=204)
