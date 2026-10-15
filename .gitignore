@@ -35,4 +35,4 @@ Thumbs.db
 *.log
 .pytest_cache/
 .mypy_cache/
-.ruff_cache/
+.ruff_cache/backup_*.sql

@@ -33,7 +33,8 @@ class ApplicationBase(SQLModel):
     date_applied: date = Field(default_factory=date.today, index=True)
     strategy_type: str = Field(default=StrategyType.TARGETED.value, max_length=20, index=True)
     status: str = Field(default=ApplicationStatus.APPLIED.value, max_length=30, index=True)
-    salary_range: Optional[str] = Field(default=None, max_length=50)
+    salary_min: Optional[int] = Field(default=None, index=True)
+    salary_max: Optional[int] = Field(default=None, index=True)
     next_follow_up: Optional[date] = Field(default=None, index=True)
     tech_stack: List[str] = Field(default_factory=list, sa_type=ARRAY(Text))
     notes: Optional[str] = Field(default=None, sa_type=Text)
@@ -74,10 +75,17 @@ class Application(ApplicationBase, table=True):
     )
 
     # Auto-stamped by the API when status transitions. Never typed by the user.
+    # These are write-once and never cleared, so historical analytics stay intact.
     first_response_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
     first_interview_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
     offer_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
     rejected_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
+
+    # Set on every status change. Used by the sweep as the "time in current status" clock.
+    status_changed_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
+
+    # Null = active. Non-null = archived. Auto-set on Rejected, auto-cleared on leaving Rejected.
+    archived_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
 
 
 class ApplicationCreate(ApplicationBase):
@@ -91,7 +99,8 @@ class ApplicationUpdate(SQLModel):
     date_applied: Optional[date] = None
     strategy_type: Optional[str] = Field(default=None, max_length=20)
     status: Optional[str] = Field(default=None, max_length=30)
-    salary_range: Optional[str] = Field(default=None, max_length=50)
+    salary_min: Optional[int] = Field(default=None, index=True)
+    salary_max: Optional[int] = Field(default=None, index=True)
     next_follow_up: Optional[date] = None
     tech_stack: Optional[List[str]] = Field(default=None, sa_type=ARRAY(Text))
     notes: Optional[str] = Field(default=None, sa_type=Text)
@@ -101,6 +110,7 @@ class ApplicationUpdate(SQLModel):
     contact_name: Optional[str] = Field(default=None, max_length=100)
     contact_email: Optional[str] = Field(default=None, max_length=200)
     rejection_reason: Optional[str] = Field(default=None, sa_type=Text)
+    archived_at: Optional[datetime] = None
 
 
 class ApplicationRead(ApplicationBase):
@@ -110,3 +120,5 @@ class ApplicationRead(ApplicationBase):
     first_interview_at: Optional[datetime] = None
     offer_at: Optional[datetime] = None
     rejected_at: Optional[datetime] = None
+    status_changed_at: Optional[datetime] = None
+    archived_at: Optional[datetime] = None

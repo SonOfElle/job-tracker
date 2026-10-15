@@ -34,7 +34,7 @@ logging.getLogger("alembic").setLevel(logging.WARNING)
 # Days until auto-scheduled follow-up, per status. None = no follow-up.
 FOLLOW_UP_DAYS: dict[str, int | None] = {
     "Applied": None,
-    "Screening": 5,
+    "Screening": 3,
     "Technical": 5,
     "Offer": 3,
     "Rejected": None,
@@ -102,10 +102,15 @@ def list_applications(
     session: Session = Depends(get_session),
     status_filter: Optional[ApplicationStatus] = Query(None, alias="status"),
     strategy_type: Optional[StrategyType] = Query(None),
+    include_archived: bool = Query(False),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> List[ApplicationRead]:
     stmt = select(Application)
+    if include_archived:
+        stmt = stmt.where(Application.archived_at.is_not(None))
+    else:
+        stmt = stmt.where(Application.archived_at.is_(None))
     if status_filter is not None:
         stmt = stmt.where(Application.status == status_filter.value)
     if strategy_type is not None:
@@ -133,6 +138,7 @@ def update_application(
     # Auto-stamp timestamps on status transitions (user never types these).
     if "status" in updates and updates["status"] != application.status:
         now = datetime.now(timezone.utc)
+        old_status = application.status
         new_status = updates["status"]
 
         if new_status in ("Screening", "Technical", "Offer") and application.first_response_at is None:
@@ -143,6 +149,16 @@ def update_application(
             application.offer_at = now
         if new_status == "Rejected" and application.rejected_at is None:
             application.rejected_at = now
+
+        # Clock for the sweep: "how long in current status".
+        application.status_changed_at = now
+
+        # Auto-archive on Rejected, auto-unarchive on leaving Rejected.
+        # Manual archives on non-Rejected rows are left alone.
+        if new_status == "Rejected" and application.archived_at is None:
+            application.archived_at = now
+        elif old_status == "Rejected" and application.archived_at is not None:
+            application.archived_at = None
 
         # Auto follow-up: only when the user didn't explicitly set one.
         if "next_follow_up" not in updates:
@@ -164,12 +180,98 @@ def update_application(
     session.refresh(application)
     return application
 
+@app.post("/applications/{application_id}/archive", response_model=ApplicationRead, tags=["applications"])
+def archive_application(application_id: int, session: Session = Depends(get_session)) -> Application:
+    application = _get_or_404(session, application_id)
+    if application.archived_at is None:
+        application.archived_at = datetime.now(timezone.utc)
+        session.add(application)
+        session.commit()
+        session.refresh(application)
+    return application
+
+
+@app.post("/applications/{application_id}/unarchive", response_model=ApplicationRead, tags=["applications"])
+def unarchive_application(application_id: int, session: Session = Depends(get_session)) -> Application:
+    application = _get_or_404(session, application_id)
+    if application.archived_at is not None:
+        application.archived_at = None
+        session.add(application)
+        session.commit()
+        session.refresh(application)
+    return application
+
 @app.delete("/applications/{application_id}", status_code=204, tags=["applications"])
 def delete_application(application_id: int, session: Session = Depends(get_session)) -> Response:
     application = _get_or_404(session, application_id)
     session.delete(application)
     session.commit()
     return Response(status_code=204)
+
+# ---- Sweep -------------------------------------------------------------- #
+
+# Auto-reject thresholds. Applied uses date_applied; others use status_changed_at.
+SWEEP_THRESHOLDS: dict[str, int] = {
+    "Applied": 30,
+    "Screening": 14,
+    "Technical": 14,
+    "Offer": 14,
+}
+
+
+@app.post("/applications/sweep", tags=["applications"])
+def sweep_applications(session: Session = Depends(get_session)) -> dict:
+    """Auto-reject stale applications and archive them. Idempotent.
+
+    Rows whose status clock is unknown (status_changed_at is null on a
+    non-Applied row) are skipped rather than guessed.
+    """
+    now = datetime.now(timezone.utc)
+    today = now.date()
+
+    stmt = select(Application).where(
+        Application.archived_at.is_(None),
+        Application.status.in_(list(SWEEP_THRESHOLDS.keys())),
+    )
+    candidates = session.execute(stmt).scalars().all()
+
+    rejected: list[dict] = []
+
+    for application in candidates:
+        threshold_days = SWEEP_THRESHOLDS[application.status]
+
+        if application.status == "Applied":
+            if application.date_applied is None:
+                continue
+            age_days = (today - application.date_applied).days
+        else:
+            if application.status_changed_at is None:
+                continue
+            age_days = (now - application.status_changed_at).days
+
+        if age_days < threshold_days:
+            continue
+
+        from_status = application.status
+        application.status = "Rejected"
+        if application.rejected_at is None:
+            application.rejected_at = now
+        application.status_changed_at = now
+        if application.archived_at is None:
+            application.archived_at = now
+        application.next_follow_up = None
+        session.add(application)
+
+        rejected.append({
+            "id": application.id,
+            "from_status": from_status,
+            "age_days": age_days,
+        })
+
+    if rejected:
+        session.commit()
+
+    return {"rejected": len(rejected), "applications": rejected}
 
 # ---- CV ---------------------------------------------------------------- #
 
