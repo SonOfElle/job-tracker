@@ -72,6 +72,12 @@ def api_get_cv_bytes(app_id):
     return None
 
 
+def api_sweep():
+    """Trigger the backend sweep. Longer timeout than normal writes."""
+    resp = requests.post(f"{API_BASE_URL}/applications/sweep", timeout=15)
+    return _handle(resp)
+
+
 # ---------- Formatting helpers ---------------------------------------------- #
 
 def _parse_iso_date(s):
@@ -90,6 +96,26 @@ def _parse_iso_dt(s):
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
+
+
+def _fmt_k(v: int) -> str:
+    """Render a monthly int as thousands: 9500 -> '9.5k', 30000 -> '30k'."""
+    if v % 1000 == 0:
+        return f"{v // 1000}k"
+    return f"{v / 1000:.1f}k"
+
+
+def format_salary(row: dict) -> str:
+    """Render salary_min / salary_max as '9.5k-30k', '30k', or ''."""
+    lo = row.get("salary_min")
+    hi = row.get("salary_max")
+    if lo is None and hi is None:
+        return ""
+    if lo is not None and hi is not None:
+        if lo == hi:
+            return _fmt_k(lo)
+        return f"{_fmt_k(lo)}-{_fmt_k(hi)}"
+    return _fmt_k(lo if lo is not None else hi)
 
 
 def format_timeline(row: dict) -> str:
@@ -162,7 +188,18 @@ with st.sidebar:
         job_title = st.text_input("Job title *")
         strategy_type = st.selectbox("Strategy", STRATEGIES)
         job_link = st.text_input("Job link")
-        salary_range = st.text_input("Salary range")
+
+        sc1, sc2 = st.columns(2, vertical_alignment="bottom")
+        with sc1:
+            salary_min_input = st.number_input(
+                "Salary (monthly)", min_value=0, step=100, value=None,
+            )
+        with sc2:
+            salary_max_input = st.number_input(
+                "max", min_value=0, step=100, value=None,
+                label_visibility="collapsed",
+            )
+
         tech_stack_raw = st.text_input("Tech stack (comma-separated)")
         date_applied = st.date_input("Date applied", value=date.today())
         has_follow_up = st.checkbox("Set follow-up date")
@@ -183,7 +220,8 @@ with st.sidebar:
                 "job_title": job_title,
                 "strategy_type": strategy_type,
                 "job_link": job_link or None,
-                "salary_range": salary_range or None,
+                "salary_min": salary_min_input or None,
+                "salary_max": salary_max_input or None,
                 "tech_stack": [s.strip() for s in tech_stack_raw.split(",") if s.strip()],
                 "date_applied": date_applied.isoformat(),
                 "next_follow_up": next_follow_up.isoformat() if next_follow_up else None,
@@ -195,7 +233,7 @@ with st.sidebar:
                 if cv_file is not None:
                     if not api_post_cv(new_id, cv_file):
                         st.warning(f"Application #{new_id} created but CV upload failed.")
-                st.success(f"Added: {company_name} — {job_title}")
+                st.success(f"Added: {company_name} - {job_title}")
                 st.rerun()
 
 
@@ -203,11 +241,31 @@ with st.sidebar:
 
 st.title("Job Application Tracker")
 
+# Sweep once per session. Auto-rejects stale applications on the backend.
+if "_swept_this_session" not in st.session_state:
+    sweep_result = api_sweep()
+    st.session_state["_swept_this_session"] = True
+    if sweep_result and sweep_result.get("rejected"):
+        st.session_state["_sweep_notice"] = sweep_result
+
+_sweep_notice = st.session_state.pop("_sweep_notice", None)
+if _sweep_notice:
+    detail = _sweep_notice.get("applications") or []
+    preview = ", ".join(
+        f"#{d['id']} {d['from_status']} ({d['age_days']}d)" for d in detail[:5]
+    )
+    suffix = f" +{len(detail) - 5} more" if len(detail) > 5 else ""
+    st.warning(
+        f"Auto-rejected {_sweep_notice['rejected']} stale application(s): {preview}{suffix}"
+    )
+
 _flash = st.session_state.pop("_flash", None)
 if _flash:
     st.toast(_flash["msg"], icon=_flash.get("icon", "✅"))
 
 applications = api_get("/applications", limit=500) or []
+archived_applications = api_get("/applications", limit=500, include_archived=True) or []
+_all_applications = applications + archived_applications
 
 err = st.session_state.pop("_save_error", None)
 if err:
@@ -249,16 +307,24 @@ m5.metric("Follow-ups due", follow_ups_due)
 st.divider()
 
 # Filters
-f1, f2, f3 = st.columns([2, 1, 1])
+f1, f2, f3, f4 = st.columns([2, 1, 1, 1])
 with f1:
     status_filter = st.multiselect("Status", STATUSES, default=STATUSES)
 with f2:
     strategy_filter = st.radio("Strategy", ["All"] + STRATEGIES, horizontal=True)
 with f3:
     only_follow_ups = st.checkbox("Only follow-ups due", value=False)
+with f4:
+    show_archived = st.checkbox("Show archived", value=False)
+
+if show_archived:
+    st.caption("Viewing archived applications. Uncheck to return to active.")
+    display_applications = archived_applications
+else:
+    display_applications = applications
 
 filtered = [
-    a for a in applications
+    a for a in display_applications
     if a["status"] in status_filter
     and (strategy_filter == "All" or a["strategy_type"] == strategy_filter)
     and (
@@ -282,7 +348,7 @@ else:
             "company": a["company_name"],
             "status": a["status"],
             "tech": ", ".join(a.get("tech_stack") or []),
-            "salary": a.get("salary_range") or "",
+            "salary": format_salary(a),
             "timeline": format_timeline(a),
             "link": a.get("job_link") or "",
             "strategy": a["strategy_type"],
@@ -300,7 +366,7 @@ else:
             "company": st.column_config.TextColumn("Company", disabled=True),
             "status": st.column_config.SelectboxColumn("Status", options=STATUSES, required=True, width="small"),
             "tech": st.column_config.TextColumn("Tech", disabled=True),
-            "salary": st.column_config.TextColumn("Salary", disabled=True, width="small"),
+            "salary": st.column_config.TextColumn("Salary", disabled=True, width="medium"),
             "timeline": st.column_config.TextColumn("Timeline", disabled=True, width="small"),
             "link": st.column_config.LinkColumn("Link", display_text=r"https?://([^/]+)", width="small"),
             "strategy": st.column_config.SelectboxColumn("Strategy", options=STRATEGIES, required=True, width="small"),
@@ -334,7 +400,7 @@ else:
             st.caption(f"{n_sel} selected")
 
         sel_ids = list(st.session_state["_selected_ids"])
-        sel_apps = [a for a in applications if a["id"] in sel_ids]
+        sel_apps = [a for a in _all_applications if a["id"] in sel_ids]
 
         if n_sel == 1:
             with b3:
@@ -409,7 +475,7 @@ else:
 
 _edit_target = st.session_state.get("_edit_target_id")
 if _edit_target is not None:
-    app = next((a for a in applications if a["id"] == _edit_target), None)
+    app = next((a for a in _all_applications if a["id"] == _edit_target), None)
     if app is None:
         st.session_state["_edit_target_id"] = None
     else:
@@ -417,7 +483,7 @@ if _edit_target is not None:
         st.divider()
         h1, h2 = st.columns([6, 1])
         with h1:
-            st.subheader(f"Editing #{selected_id} — {app['company_name']} ({app['job_title']})")
+            st.subheader(f"Editing #{selected_id} - {app['company_name']} ({app['job_title']})")
         with h2:
             if st.button("Close", use_container_width=True):
                 st.session_state["_edit_target_id"] = None
@@ -430,7 +496,22 @@ if _edit_target is not None:
             e_status = st.selectbox("Status", STATUSES, index=STATUSES.index(app["status"]))
             e_link = st.text_input("Job link", value=app.get("job_link") or "")
             e_source = st.text_input("Source", value=app.get("source") or "")
-            e_salary = st.text_input("Salary range", value=app.get("salary_range") or "")
+
+            sc1, sc2 = st.columns(2, vertical_alignment="bottom")
+            with sc1:
+                e_salary_min = st.number_input(
+                    "Salary (monthly)", min_value=0, step=100,
+                    value=app.get("salary_min"),
+                    key=f"e_sal_min_{selected_id}",
+                )
+            with sc2:
+                e_salary_max = st.number_input(
+                    "max", min_value=0, step=100,
+                    value=app.get("salary_max"),
+                    label_visibility="collapsed",
+                    key=f"e_sal_max_{selected_id}",
+                )
+
             e_tech = st.text_input("Tech stack (comma-separated)", value=", ".join(app.get("tech_stack") or []))
             e_date = st.date_input("Date applied", value=_parse_iso_date(app["date_applied"]) or date.today())
             e_contact_name = st.text_input("Contact name", value=app.get("contact_name") or "")
@@ -484,7 +565,8 @@ if _edit_target is not None:
                 "status": e_status,
                 "job_link": e_link or None,
                 "source": e_source or None,
-                "salary_range": e_salary or None,
+                "salary_min": e_salary_min or None,
+                "salary_max": e_salary_max or None,
                 "tech_stack": [s.strip() for s in e_tech.split(",") if s.strip()],
                 "date_applied": e_date.isoformat(),
                 "next_follow_up": e_nfu.isoformat() if e_nfu else None,
@@ -500,7 +582,8 @@ if _edit_target is not None:
                 "status": app["status"],
                 "job_link": app.get("job_link") or None,
                 "source": app.get("source") or None,
-                "salary_range": app.get("salary_range") or None,
+                "salary_min": app.get("salary_min"),
+                "salary_max": app.get("salary_max"),
                 "tech_stack": app.get("tech_stack") or [],
                 "date_applied": app["date_applied"],
                 "next_follow_up": app.get("next_follow_up"),
